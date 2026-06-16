@@ -1,98 +1,121 @@
-*** End Patch
-# Zarkom Project
+# MULTI-NODE NETWORK SYSTEM: WEB SERVER, CACHING PROXY, & UDP QOS PINGER
+=============================================================================
 
-## Overview
-Zarkom is a simple proxy server and web server application designed to facilitate HTTP requests and responses between clients and web servers. This project demonstrates the use of sockets in Python to create a functional proxy and web server.
+Sistem jaringan terdistribusi berbasis 3-Node Architecture yang dirancang menggunakan Socket Programming tingkat rendah di Python. Proyek ini mengimplementasikan Multi-threaded Web Server, Smart HTTP Caching Proxy untuk efisiensi jaringan, serta UDP QoS Pinger mandiri untuk mengukur metrik performa kualitas layanan (Quality of Service) secara real-time.
 
-## Features
-- **Proxy Server**: Handles incoming requests from clients and forwards them to the appropriate web server.
-- **Web Server**: Serves static files to clients, including HTML, CSS, and images.
-- **Caching**: Implements a basic caching mechanism to store frequently requested files.
+-----------------------------------------------------------------------------
+ARSITEKTUR JARINGAN & ALUR KOMUNIKASI
+-----------------------------------------------------------------------------
+Sistem ini memisahkan lalu lintas data menjadi dua jalur utama berdasarkan tujuan fungsionalnya: Jalur Distribusi Konten (TCP) dan Jalur Analisis Jaringan (UDP).
 
-## Components
-### 1. Client
-The client connects to the proxy server and sends HTTP requests. It is designed to initiate requests for specific files and handle responses from the proxy.
+                  +----------------------------------------+
+                  |               ALUR TCP                 |
+                  v                                        |
+  +-----------------------+  TCP (Port 8080)   +-----------------------+
+  |       CLIENT          | =================> |     CACHING PROXY     |
+  |   (ID: shahrul)       |                    |   (Port 8080 / 0.0.0) |
+  +-----------------------+                    +-----------------------+
+     |                                                     |
+     |                                                     | TCP (Port 8000)
+     |                ALUR UDP (QoS Ping)                  | (Forwarding if MISS)
+     +=================================================+   |
+                                                       v   v
+                                               +-----------------------+
+                                               |      WEB SERVER       |
+                                               |  TCP: 8000 | UDP: 9000|
+                                               +-----------------------+
 
-```python
-import socket
-import time
+SPESIFIKASI TOPOLOGI NODE:
+1. client.py
+   - Protokol: TCP & UDP
+   - Port: Dinamis (OS)
+   - Status: Aktif (Inisiator)
+   - Peran Utama: Meminta aset web via Proxy & Menguji performa QoS ke Web Server.
 
-PROXY_IP = '127.0.0.1'
-PROXY_PORT = 8080
+2. proxy.py
+   - Protokol: TCP
+   - Port: 8080
+   - Status: Pasif (Listen) & Aktif
+   - Peran Utama: Menjadi perantara (Middleman), mengelola cache lokal, meneruskan miss request.
 
-CLIENT_ID = "babas"
+3. webserver.py
+   - Protokol: TCP & UDP
+   - Port: 8000 (TCP), 9000 (UDP)
+   - Status: Pasif (Listen)
+   - Peran Utama: Menyediakan aset statis (HTTP) & Memantulkan paket (UDP Echo Server).
 
-def test_tcp_http(filename="/index.html"):
-    # Initiates HTTP TCP Request to Proxy
-    ...
-```
 
-### 2. Proxy
-The proxy server listens for incoming connections from clients, processes their requests, and forwards them to the web server. It also manages caching for efficiency.
+-----------------------------------------------------------------------------
+CARA KERJA & MEKANISME DETAIL PROYEK
+-----------------------------------------------------------------------------
 
-```python
-import socket
-import threading
-import os
+1. Alur HTTP Web Request & Caching (TCP)
+Ketika Klien meminta file web (contoh: /index.html), sistem bekerja dengan mekanisme kontrol berikut:
+* Inisiasi Klien: Klien membuka socket TCP (SOCK_STREAM) dan mengirimkan HTTP Request Header standar (GET /index.html HTTP/1.1) ke arah Proxy (Port 8080).
+* Pengecekan Proxy (Cache Handler): Proxy menerima request, memisahkan path URL, dan memeriksa direktori ./cache/.
+  - CACHE HIT: Jika file sudah pernah diunduh sebelumnya (misal tersimpan sebagai _index.html), Proxy langsung membaca file lokal tersebut dan mengirimkannya ke Klien tanpa menyentuh Web Server. Waktu respons menjadi sangat minim (< 1 ms).
+  - CACHE MISS: Jika file belum ada, Proxy bertindak sebagai klien baru. Ia membuka koneksi TCP ke Web Server asli (Port 8000), meminta file tersebut, menerima seluruh aliran byte data, lalu menyaring responsnya. Jika statusnya 200 OK, Proxy menyimpan salinannya ke folder cache untuk kebutuhan mendatang, lalu meneruskan data tersebut kembali ke Klien asli.
+* Resiliensi & Error Handling: Proxy dilengkapi dengan batas waktu (timeout 5 detik). Jika Web Server mati atau tidak merespons, Proxy secara otomatis membuat HTTP Response buatan berupa 540 Gateway Timeout atau 502 Bad Gateway agar browser/klien tidak mengalami hang.
 
-PROXY_PORT = 8080
-PROXY_HOST = '0.0.0.0'
+2. Alur Pengujian Kualitas Jaringan (UDP QoS)
+Untuk mengukur kesehatan infrastruktur jaringan fisik (terutama saat menggunakan skenario 3 laptop berbeda), Klien melakukan bypass langsung ke Web Server menggunakan UDP (SOCK_DGRAM):
+* Sifat Connectionless: Klien melempar 10 paket data berisi sequence number dan timestamp presisi tinggi ke Port 9000 milik Web Server tanpa proses handshake.
+* Mekanisme Echo: Sisi webserver.py menjalankan thread UDP pasif yang bertugas menangkap paket apa saja yang masuk ke port 9000, lalu memantulkannya kembali secara utuh (echo) ke IP dan Port pengirim asli.
+* Komputasi QoS Matematik di Sisi Klien:
+  - RTT (Round Trip Time): Dihitung selisih waktu dari paket dikirim hingga paket pantulan diterima kembali (RTT = T_recv - T_send).
+  - Jitter (Variasi Latensi): Mengukur stabilitas delay antar-paket berurutan menggunakan rumus nilai absolut selisih RTT.
+  - Packet Loss: Jika dalam 1.0 detik paket pantulan tidak kembali, socket melempar instruksi socket.timeout, paket dianggap hilang, dan persentase kehilangan dihitung secara akumulatif.
 
-def handle_client(client_socket, addr):
-    # Handles client requests
-    ...
-```
 
-### 3. Web Server
-The web server serves static files to clients. It recognizes different MIME types to ensure proper file handling and response formatting.
+-----------------------------------------------------------------------------
+FITUR-FITUR UNGGULAN PROYEK
+-----------------------------------------------------------------------------
+1. High-Concurrency Multi-threading: Baik Web Server maupun Proxy menggunakan modul threading.Thread untuk memisahkan setiap koneksi baru ke dalam worker thread mandiri. Server tidak akan mengalami blocking meskipun diakses banyak klien sekaligus.
+2. MIME-Type Intelligence: Web Server mengenali ekstensi file (.html, .css, .js, .png, .jpg, dll) secara dinamis untuk menyusun Content-Type Header yang tepat agar dibaca sempurna oleh engine rendering browser.
+3. Automated Cache Sanitization: Penamaan file cache otomatis mengonversi karakter ilegal/garis miring URL menjadi bentuk yang aman untuk dibaca oleh berkas Sistem Operasi lokal (contoh: /images/logo.png menjadi _images_logo.png).
+4. Isolated Status Directory: Jika terjadi kegagalan pencarian berkas di server, sistem akan mencari file kustom ./status/404.html terlebih dahulu untuk memberikan pengalaman visual error page yang profesional kepada pengguna.
 
-```python
-import socket
-import threading
-from datetime import datetime
 
-TCP_PORT = 8000
-HOST = '0.0.0.0'
+-----------------------------------------------------------------------------
+PANDUAN INSTALASI & PENGUJIAN SISTEM
+-----------------------------------------------------------------------------
 
-MIME_TYPES = {
-    '.html': 'text/html; charset=utf-8',
-    '.css': 'text/css',
-    ...
-}
-```
+A. Uji Coba Terisolasi (1 Laptop / Localhost)
+Secara default, seluruh konfigurasi IP diatur ke arah 127.0.0.1. Anda dapat langsung menjalankan ketiga terminal secara berurutan.
+1. Terminal 1: python webserver.py
+2. Terminal 2: python proxy.py
+3. Terminal 3: python client.py
 
-## Installation
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Buzzz16/TUBES-JARKOM-ZARKOM.git
-   ```
-2. Navigate to the project directory:
-   ```bash
-   cd TUBES-JARKOM-ZARKOM
-   ```
-3. Run the web server:
-   ```bash
-   python webserver.py
-   ```
-4. Run the proxy server:
-   ```bash
-   python proxy.py
-   ```
-5. Run the client:
-   ```bash
-   python client.py
-   ```
+B. Uji Coba Lapangan (3 Laptop Berbeda)
+Jika Anda melakukan presentasi menggunakan 3 laptop yang terhubung dalam satu jaringan Wi-Fi/LAN yang sama, ikuti perubahan konfigurasi berikut:
+1. Cari Tahu IP Masing-Masing: Ketik ipconfig (Windows) atau ifconfig (Mac/Linux) di terminal.
+2. Konfigurasi webserver.py: Tetap gunakan HOST = '0.0.0.0'
+3. Konfigurasi proxy.py: Ubah WEBSERVER_HOST = 'IP_LAPTOP_WEBSERVER_KAMU'
+4. Konfigurasi client.py: 
+   - Ubah PROXY_IP = 'IP_LAPTOP_PROXY_KAMU'
+   - Ubah WEBSERVER_IP = 'IP_LAPTOP_WEBSERVER_KAMU'
+   - Sesuaikan CLIENT_ID dengan nama unik.
 
-## Usage
-- Open your browser and navigate to `http://127.0.0.1:8080` to interact with the proxy server.
-- The client will initiate requests to the proxy, which will then fetch the requested resources from the web server.
 
-## Contributing
-Contributions are welcome! Please open an issue or submit a pull request for any enhancements or bug fixes.
+-----------------------------------------------------------------------------
+LOG TERMINAL YANG DIHARAPKAN
+-----------------------------------------------------------------------------
+* Saat Cache MISS (Pertama kali akses berkas):
+  [PROXY LOG] 192.168.1.5 | /index.html | MISS | 12.45 ms
+  [TCP LOG] 18:23:01 | 192.168.1.10 | /index.html | 200 OK
 
-## License
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+* Saat Cache HIT (Akses kedua kali dan seterusnya):
+  [PROXY LOG] 192.168.1.5 | /index.html | HIT | 0.15 ms
 
----
+* Statistik QoS UDP:
+  [Client: shahrul] --- Statistik QoS UDP ---
+  Min RTT   : 2.10 ms
+  Max RTT   : 5.89 ms
+  Avg RTT   : 3.42 ms
+  Avg Jitter: 0.85 ms
+  Packet Loss: 0%
 
-**Enjoy using Zarkom!**
+=============================================================================
+Dibuat untuk Tugas Besar Jaringan Komputer.
+Pastikan struktur folder ./status/ dan file ./index.html sudah tersedia 
+sebelum memulai pengujian!
